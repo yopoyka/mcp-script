@@ -1,0 +1,228 @@
+#!/bin/bash
+
+branch="mcp_stable"
+mappings_version=""
+minecraft_version=""
+grepargs=""
+mcp_dir="$HOME/.config/mcp-bot"
+store="$mcp_dir/mappings"
+store_stable="$store/mcp_stable"
+store_snapshots="$store/mcp_snapshots"
+stable_url="https://files.minecraftforge.net/maven/de/oceanlabs/mcp/mcp_stable"
+snapshots_url="https://files.minecraftforge.net/maven/de/oceanlabs/mcp/mcp_snapshot"
+
+search=""
+seatch_type=""
+
+version_regrex='(?!<version>)[\w._-]+(?=</version>)'
+
+tmp=/tmp/mcp-bot
+
+declare -A urls
+urls[mcp_stable]="$stable_url"
+urls[mcp_snapshots]="$snapshots_url"
+
+update_mappings() {
+    [ -z "$branch" ] && echo "Specify mcp branch to update!" && exit 1
+    echo "Updating mappings..."
+    update_branch $branch
+}
+
+update_branch() {
+    url="${urls[$1]}"
+    dir="$store/$1"
+
+    [ -z "$url" ] && echo "Url for branch $1 not found!" && exit 1
+
+    if [ -n "$purge" ]; then
+        if [ -z "$force" ]; then
+            read -p "$1 [Y/n]: " -n 1
+            echo
+            if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+                echo "Terminating..."
+                exit 1
+            fi
+        fi
+        echo "Purging branch $1"
+        rm -rf "$dir"
+    fi
+
+    mkdir -p "$dir"
+    mkdir -p "$tmp"
+    metadata=$(curl -Lsf "$url/maven-metadata.xml")
+    artifact_id=$(echo "$metadata" | grep -oP -m1 '(?!<artifactId>)[\w._-]+(?=</artifactId>)')
+
+    diff --new-line-format="" --unchanged-line-format="" <(echo "$metadata" | grep -oP '(?!<version>)[\w._-]+(?=</version>)' | sort) <(ls --color=never -1 "$dir/" | sort) | grep -P "$mappings_version\-$minecraft_version" | while read v;
+    do
+        echo "Downloading $artifact_id-$v.zip"
+        curl -Lsf "$url/$v/$artifact_id-$v.zip" -o "$tmp/$artifact_id-$v.zip"
+        mkdir "$dir/$v"
+        echo "Extracting $v"
+        unzip "$tmp/$artifact_id-$v.zip" -d "$dir/$v" > /dev/null
+    done
+
+    rm -rf "$tmp"
+}
+
+do_search() {
+#   echo "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)"
+    files=$(find "$store" | grep -P "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)")
+    [ -n "$manual_grep" ] && echo "$files" && exit 0
+    echo "$files" | xargs grep -PH $(echo "${search[@]} ${grepargs[@]}" | tr "\n" " ") || echo "Nothign found!" && exit 1
+}
+
+do_reach() {
+#    echo "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)"
+    files=$(find "$store" | grep -P "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)")
+    [ -n "$manual_grep" ] && echo "$files" && exit 0
+    echo "$files" | xargs grep -P $(echo "${search[@]} ${grepargs[@]}" | tr "\n" " ") -H | while read line;
+        do
+            echo "$line"
+            line="${line//$'\r'}"
+            info_data="${line#*csv:}"
+            info_file="${line%%:*}"
+            info_t="${info_file%/*}"
+            info_t="${info_t##*/}"
+            info_mc_version="${info_t##*-}"
+            info_mcp_version="${info_t%%-*}"
+            info_srg_name="${info_data%%,*}"
+            info_comment="${info_data#*,}"
+            info_comment="${info_comment#*,}"
+            info_comment="${info_comment#*,}"
+            info_t="${info_data#*,}"
+            info_side="${info_t#*,}"
+            info_src_name="${info_t%%,*}"
+
+            echo "Minecraft: $info_mc_version"
+            echo "MCP: $branch $info_mcp_version"
+            echo
+
+            case "$search_type" in
+                "methods.csv") echo "Method: $info_src_name";;
+                "fields.csv") echo "Field: $info_src_name";;
+                "params.csv") ;;
+            esac
+
+            [[ "$info_side" = 0* ]] && echo "Side: CLIENT"
+            [[ "$info_side" = 1* ]] && echo "Side: SERVER"
+            [[ "$info_side" = 2* ]] && echo "Side: BOTH"
+
+            [ -n "$info_comment" ] && echo "Comment: $info_comment" && echo
+
+
+            info_srg="$mcp_dir/srg"
+
+            case "$search_type" in
+                "methods.csv")
+                    grep "MD: .*/$info_srg_name" "$info_srg/$info_mc_version/joined.srg" | while read line;
+                    do
+                        info_method=${line## *}
+                        info_method=${info_method////.}
+                        echo "$info_method"
+                    done
+                    ;;
+                "fields.csv")
+                    grep "FD: .*/$info_srg_name" "$info_srg/$info_mc_version/joined.srg" | while read line;
+                    do
+                        info_method=${line## *}
+                        info_method=${info_method////.}
+                        echo "$info_method"
+                    done
+#                   info_t=$(grep "MD: .*/$search")
+#                   info_field=${info_t%% *}
+#                   info_field=${info_method////.}
+                    ;;
+                "params.csv") ;;
+            esac
+            echo
+
+
+#           find "$mcp_dir/srg" | grep -oP "$mcp_dir/srg/($minecraft_version.*)/"
+        done
+}
+
+download_srg() {
+    srg_url="https://files.minecraftforge.net/maven/de/oceanlabs/mcp/mcp"
+    dir="$mcp_dir/srg"
+
+    if [ -z "$force" ]; then
+        read -p "Are You sure You want to download srgs? [Y/n]: " -n 1
+        echo
+        if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+            echo "Terminating..."
+            exit 1
+        fi
+    fi
+    echo "Downloading srgs"
+    rm -rf "$dir"
+
+    mkdir -p "$tmp/srg"
+    mkdir -p "$dir"
+
+    curl -Lsf "$srg_url/maven-metadata.xml" | grep -oP '(?!<version>)[\w._-]+(?=</version>)' | while read v;
+    do
+        echo "Downloading mcp-$v.srg.zip"
+        mkdir -p "$dir/$v"
+        curl -Lsf "$srg_url/$v/mcp-$v-srg.zip" -o "$tmp/srg/$v"
+        unzip "$tmp/srg/$v" -d "$dir/$v" "joined.srg" "joined.exc" "static_methods.txt" > /dev/null
+    done
+
+    rm -rf "$tmp/srg"
+}
+
+print_help() {
+    cat << EOF
+mcp: search mappings names
+
+Options:
+	-s	search on stable branch
+	-u	seatch on snapshots branch
+	-b	search on custom branch
+	-f	search for field
+	-m	search for method
+	-p	search for parameter
+	-v	minecraft version
+	-V	mappings version
+	-U	update mappings
+	-P	purge branch
+	-F	don't prompt for confirmation
+	-g	return found files list for manual greping
+	-D	download srgs
+	-R	include additional information
+	-w	grep whole words
+	-i	grep case insensitive
+
+Examples:
+	mcp -f field_000000_a
+EOF
+}
+
+while getopts "wiRDhsuUPFgf:m:p:v:V:b:q:" o; do
+    case "$o" in
+        s) branch="mcp_stable";;
+        u) branch="mcp_snapshots";;
+        b) branch="$OPTARG";;
+        f) search_type="fields.csv"; search="$OPTARG";;
+        m) search_type="methods.csv"; search="$OPTARG";;
+        p) search_type="params.csv"; search="$OPTARG";;
+        v) minecraft_version="$OPTARG";;
+        V) mappings_version="$OPTARG";;
+        U) do_update="update";;
+        P) purge="true";;
+        F) force="true";;
+        h) print_help && exit 0 ;;
+        g) manual_grep="true";;
+        D) do_srg="true";;
+        R) reach="true";;
+        w) grepargs="$grepargs -w";;
+        i) grepargs="$grepargs -i";;
+        *) exit 1 ;;
+    esac
+done
+
+[ -n "$do_srg" ] && download_srg && exit 0
+[ -n "$do_update" ] && update_mappings && exit 0
+[ -n "$reach" ] && do_reach && exit 0
+[ -n "$search" ] && do_search && exit 0
+
+echo "No action specified!" && print_help && exit 1

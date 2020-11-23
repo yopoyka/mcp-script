@@ -1,0 +1,125 @@
+#!/bin/bash
+
+mappings_version=""
+minecraft_version=""
+search=""
+seatch_type=""
+mcp_branch="mcp_stable"
+store="$HOME/.config/mcp-bot"
+store_stable="$store/mcp_stable"
+store_snapshots="$store/mcp_snapshots"
+
+version_regrex='(?!<version>)[\w._-]+(?=</version>)'
+
+stable_url="https://files.minecraftforge.net/maven/de/oceanlabs/mcp/mcp_stable"
+snapshots_url="https://files.minecraftforge.net/maven/de/oceanlabs/mcp/mcp_snapshot"
+
+tmp=/tmp/mcp-bot
+
+declare -A urls
+urls[mcp_stable]="$stable_url"
+urls[mcp_snapshots]="$snapshots_url"
+
+declare -A stores
+stores[mcp_stable]="$store_stable"
+stores[mcp_snapshots]="$store_snapshots"
+
+setact() {
+    action="$1"
+}
+
+update_mappings() {
+    echo "Updating mappings..."
+    [ -z "$mcp_branch" ] && echo "Specify mcp branch to update!" && exit 1
+    update_branch $mcp_branch
+}
+
+update_branch() {
+    url=${urls[$1]}
+    dir=${stores[$1]}
+
+    [ -z "$url" ] && echo "Url for branch $1 not found!" && exit 1
+    [ -z "$dir" ] && echo "Storage for branch $1 not found!" && exit 1
+
+    if [ -n "$purge" ]; then
+        if [ -z "$force" ]; then
+            read -p "Are You shure You want to purge branch $1? [Y/n]: " -n 1 -r
+            echo
+            [[ ! "$REPLY" =~ ^[Yy]$ ]] && echo "Terminating..." && exit 1
+        fi
+        echo "Purging branch $1"
+        rm -rf "$dir"
+    fi
+
+    mkdir -p "$dir"
+    mkdir -p "$tmp"
+    metadata=$(curl -Ls "$url/maven-metadata.xml")
+    artifact_id=$(echo "$metadata" | grep -oP -m1 '(?!<artifactId>)[\w._-]+(?=</artifactId>)')
+
+    diff --new-line-format="" --unchanged-line-format="" <(echo "$metadata" | grep -oP '(?!<version>)[\w._-]+(?=</version>)' | sort) <(ls --color=never -1 "$dir/" | sort) | grep -P "$mappings_version\-$minecraft_version" | while read v;
+    do
+        echo "Downloading $artifact_id-$v.zip"
+        curl -Ls "$url/$v/$artifact_id-$v.zip" -o "$tmp/$artifact_id-$v.zip"
+        mkdir "$dir/$v"
+        echo "Extracting $v"
+        unzip "$tmp/$artifact_id-$v.zip" -d "$dir/$v" > /dev/null
+    done
+
+    rm -rf "$tmp"
+}
+
+search() {
+    echo "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)"
+    files=$(find ${stores[@]} | grep -P "($mcp_branch)/($mappings_version.*)-($minecraft_version.*)/($search_type)")
+    [ -n "$manual_grep" ] && echo "$files" && exit 0
+    echo "$files" | xargs grep -P $(echo "${search[@]}" | tr "\n" " ") || echo "Nothign found!" && exit 1
+}
+
+print_help() {
+    cat << EOF
+mcp: search mappings names
+
+Options:
+	-s	search on stable branch
+	-u	seatch on snapshots branch
+	-f	search field
+	-m	search method
+	-p	search parameter
+	-q  query
+	-v	minecraft version
+	-V	mappings version
+	-U	update mappings
+	-b	set custom branch
+	-P	purge branch
+	-F	don't prompt for confirmation
+	-g	return found files list for manual greping
+
+Examples:
+	mcp -f field_000000_a
+EOF
+}
+
+while getopts "hsuUPFfmpgv:V:b:q:" o; do
+    case "$o" in
+        s) mcp_branch="mcp_stable";;
+        u) mcp_branch="mcp_snapshots";;
+        b) mcp_branch="$OPTARG";;
+        f) [ -n "$search_type" ] && search_type="$search_type|"; search_type="${search_type}fields.csv";;
+        m) [ -n "$search_type" ] && search_type="$search_type|"; search_type="${search_type}methods.csv";;
+        p) [ -n "$search_type" ] && search_type="$search_type|"; seatch_type="${search_type}params.csv";;
+        q) search="$OPTARG";;
+        v) minecraft_version="$OPTARG";;
+        V) mappings_version="$OPTARG";;
+        U) do_update="update";;
+        P) purge="true";;
+        F) force="true";;
+        h) print_help && exit 0 ;;
+        g) manual_grep="true";;
+        *) print_help && exit 1 ;;
+    esac
+done
+
+[ -n "$do_update" ] && update_mappings && exit 0
+[ -n "$search" ] && search && exit 0
+
+echo "No action specified!" && print_help && exit 1
